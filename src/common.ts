@@ -24,10 +24,30 @@ export const BINARIES_WIN64 = path.join(
 
 export const UE4SS_DIR = path.join(BINARIES_WIN64, 'ue4ss');
 export const UE4SS_LOADER = path.join(BINARIES_WIN64, 'dwmapi.dll');
+export const UE4SS_SIGNATURES_FOLDER = 'UE4SS_Signatures';
+export const UE4SS_SIGNATURES_PATH = path.join(
+  UE4SS_DIR,
+  UE4SS_SIGNATURES_FOLDER,
+);
 
 export const LUA_MODS_PATH = path.join(UE4SS_DIR, 'Mods');
 export const SHARED_LIBS_PATH = path.join(LUA_MODS_PATH, 'shared');
 export const MODS_FILE = 'mods.txt';
+
+export const BITFIX_FOLDER_NAME = 'bitfix';
+export const BITFIX_DIR = path.join(BINARIES_WIN64, BITFIX_FOLDER_NAME);
+export const BITFIX_PROXY_NAMES = [
+  'x3daudio1_7.dll',
+  'd3d9.dll',
+  'winmm.dll',
+  'version.dll',
+  'dsound.dll',
+  'bitfix.dll',
+];
+export const BITFIX_ONDISK_MARKERS = [
+  'bitfix.txt',
+  ...BITFIX_PROXY_NAMES,
+];
 
 export const CONTENT_PATH = path.join(ROOT_FOLDER, 'Content');
 
@@ -38,16 +58,17 @@ export const PAK_MODS_PATH = path.join(PAKS_PATH, '~mods');
 export const LOGICMODS_PATH = path.join(PAKS_PATH, 'LogicMods');
 
 export const MOD_TYPE_UE4SS = `${GAME_ID}-ue4ss`;
+export const MOD_TYPE_BITFIX = `${GAME_ID}-bitfix`;
+export const MOD_TYPE_BITFIX_MOD = `${GAME_ID}-bitfix-mod`;
 export const MOD_TYPE_SHARED_LIB = `${GAME_ID}-ue4ss-shared`;
+export const MOD_TYPE_UE4SS_SIG = `${GAME_ID}-ue4ss-sig`;
 export const MOD_TYPE_LUA = `${GAME_ID}-ue4ss-lua`;
 export const MOD_TYPE_PAK = `${GAME_ID}-pak`;
 export const MOD_TYPE_LOGICMOD = `${GAME_ID}-logicmod`;
-export const MOD_TYPE_COMBO = `${GAME_ID}-ue4ss-combo`;
 export const MOD_TYPE_ROOT = `${GAME_ID}-root`;
 export const MOD_TYPE_DLL = `${GAME_ID}-ue4ss-dll`;
 export const MOD_TYPE_PAKALT = `${GAME_ID}-pakalt`;
 export const MOD_TYPE_CONTENT = `${GAME_ID}-content`;
-export const MOD_TYPE_BINARIES = `${GAME_ID}-binaries`;
 
 export const SHARED_LIB_MARKERS = [
   'ue4sslib.info',
@@ -59,6 +80,12 @@ export const LUA_MOD_MARKERS = [
   'ue4ssmod.info',
   '.ue4ssmod',
   '.luamod',
+];
+
+export const UE4SS_SIG_MARKERS = [
+  'ue4sssig.info',
+  '.ue4sssig',
+  '.sigmod',
 ];
 
 export const DLL_MOD_MARKERS = [
@@ -92,16 +119,20 @@ export const PAKALT_MARKERS = [
   '.pakalt',
 ];
 
-export const COMBO_MARKERS = [
-  'ue4sscombo.info',
-  '.ue4sscombo',
-  '.combomod',
-];
-
+/** Unified root / mixed / binaries markers (aliases kept for authors). */
 export const ROOT_MARKERS = [
   'ue4ssroot.info',
   '.ue4ssroot',
   '.rootmod',
+  'ue4sscombo.info',
+  '.ue4sscombo',
+  '.combomod',
+  'ue4ssmulti.info',
+  '.ue4ssmulti',
+  '.multimod',
+  'ue4ssbinaries.info',
+  '.ue4ssbinaries',
+  '.binariesmod',
 ];
 
 export const CONTENT_MARKERS = [
@@ -110,24 +141,24 @@ export const CONTENT_MARKERS = [
   '.contentmod',
 ];
 
-export const BINARIES_MARKERS = [
-  'ue4ssbinaries.info',
-  '.ue4ssbinaries',
-  '.binariesmod',
+export const BITFIX_MARKERS = [
+  'bitfix.info',
+  '.bitfix',
+  '.bitfixmod',
 ];
 
 export const ALL_MOD_MARKERS = [
   ...SHARED_LIB_MARKERS,
   ...LUA_MOD_MARKERS,
+  ...UE4SS_SIG_MARKERS,
   ...DLL_MOD_MARKERS,
   ...LOGICMOD_MARKERS,
   ...PAK_MARKERS,
   ...IOSTORE_MARKERS,
   ...PAKALT_MARKERS,
-  ...COMBO_MARKERS,
   ...ROOT_MARKERS,
   ...CONTENT_MARKERS,
-  ...BINARIES_MARKERS,
+  ...BITFIX_MARKERS,
 ];
 
 export function hasMarker(
@@ -153,13 +184,23 @@ export const UE4SS_SETTINGS_NAME = 'UE4SS-settings.ini';
 export const UE4SS_FOLDER_NAME = 'ue4ss';
 export const MODS_FILE_BACKUP = 'mods.txt.original';
 
+export const BITFIX_NEXUS_MOD_ID = 14;
+export const BITFIX_NEXUS_URL =
+  'https://www.nexusmods.com/echoesofaincrad/mods/14';
+
 export const LUA_EXTENSIONS = ['.lua'];
 export const PAK_EXTENSIONS = ['.pak', '.utoc', '.ucas'];
 
 export const FOLDER_ATTR = 'eoaFolderId';
+export const FOLDERS_ATTR = 'eoaFolderIds';
+export const SIG_FILES_ATTR = 'eoaSigFiles';
+export const NEEDS_UE4SS_ATTR = 'eoaNeedsUe4ss';
+export const NEEDS_BITFIX_ATTR = 'eoaNeedsBitfix';
 
 export const IGNORE_CONFLICTS = [
   'enabled.txt',
+  'mods.txt',
+  'UE4SS-settings.ini',
   ...ALL_MOD_MARKERS,
 ];
 
@@ -176,3 +217,5 @@ export const UE4SS_BUILTIN_MODS = [
 
 export const NOTIF_ID_UE4SS_MISSING = 'eoa-ue4ss-missing';
 export const NOTIF_ID_UE4SS_INSTALLING = 'eoa-ue4ss-installing';
+export const NOTIF_ID_BITFIX_MISSING = 'eoa-bitfix-missing';
+export const NOTIF_ID_BITFIX_INSTALLING = 'eoa-bitfix-installing';

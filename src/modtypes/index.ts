@@ -2,8 +2,10 @@ import path from 'path';
 import { selectors, types } from 'vortex-api';
 
 import {
-  BINARIES_MARKERS,
   BINARIES_WIN64,
+  BITFIX_DIR,
+  BITFIX_FOLDER_NAME,
+  BITFIX_MARKERS,
   CONTENT_MARKERS,
   CONTENT_PATH,
   DLL_MOD_MARKERS,
@@ -13,8 +15,8 @@ import {
   LUA_EXTENSIONS,
   LUA_MOD_MARKERS,
   LUA_MODS_PATH,
-  MOD_TYPE_BINARIES,
-  MOD_TYPE_COMBO,
+  MOD_TYPE_BITFIX,
+  MOD_TYPE_BITFIX_MOD,
   MOD_TYPE_CONTENT,
   MOD_TYPE_DLL,
   MOD_TYPE_LOGICMOD,
@@ -24,6 +26,7 @@ import {
   MOD_TYPE_ROOT,
   MOD_TYPE_SHARED_LIB,
   MOD_TYPE_UE4SS,
+  MOD_TYPE_UE4SS_SIG,
   PAK_EXTENSIONS,
   PAK_MARKERS,
   PAK_MODS_PATH,
@@ -32,6 +35,8 @@ import {
   SHARED_LIBS_PATH,
   SHARED_LIB_MARKERS,
   UE4SS_LOADER_NAME,
+  UE4SS_SIGNATURES_FOLDER,
+  UE4SS_SIG_MARKERS,
 } from '../common';
 import { pakPrefixForMod } from '../modsFile';
 
@@ -107,15 +112,45 @@ export function testUe4ssPath(
   );
 }
 
-export function getComboPath(api: types.IExtensionApi): string {
-  return getGameRootPath(api);
+export function getBitfixPath(api: types.IExtensionApi): string {
+  const root = discoveryPath(api);
+  return root ? path.join(root, BINARIES_WIN64) : '.';
 }
 
-export function testComboPath(
+export function testBitfixPath(
   instructions: types.IInstruction[],
 ): Promise<boolean> {
+  if (hasModTypeInstruction(instructions)) {
+    return Promise.resolve(
+      modTypeFromInstructions(instructions) === MOD_TYPE_BITFIX,
+    );
+  }
   return Promise.resolve(
-    modTypeFromInstructions(instructions) === MOD_TYPE_COMBO,
+    sourceHasSegment(instructions, BITFIX_FOLDER_NAME) &&
+      instructions.some(
+        (inst) =>
+          inst.type === 'copy' &&
+          path.extname(inst.source as string).toLowerCase() === '.dll',
+      ),
+  );
+}
+
+export function getBitfixModPath(api: types.IExtensionApi): string {
+  const root = discoveryPath(api);
+  return root ? path.join(root, BITFIX_DIR) : '.';
+}
+
+export function testBitfixModPath(
+  instructions: types.IInstruction[],
+): Promise<boolean> {
+  if (hasModTypeInstruction(instructions)) {
+    return Promise.resolve(
+      modTypeFromInstructions(instructions) === MOD_TYPE_BITFIX_MOD,
+    );
+  }
+  return Promise.resolve(
+    instructionsHaveMarker(instructions, BITFIX_MARKERS) ||
+      sourceHasSegment(instructions, BITFIX_FOLDER_NAME),
   );
 }
 
@@ -132,6 +167,28 @@ export function testRootModPath(
     );
   }
   return Promise.resolve(instructionsHaveMarker(instructions, ROOT_MARKERS));
+}
+
+export function getUe4ssSigPath(api: types.IExtensionApi): string {
+  // Deploy from ue4ss/Mods (like Lua), NOT Win64/ue4ss — sharing the UE4SS
+  // core root caused conflict resolution to purge the whole Mods tree.
+  // Signatures are deployed via ../UE4SS_Signatures/ relative to this path.
+  const root = discoveryPath(api);
+  return root ? path.join(root, LUA_MODS_PATH) : '.';
+}
+
+export function testUe4ssSigPath(
+  instructions: types.IInstruction[],
+): Promise<boolean> {
+  if (hasModTypeInstruction(instructions)) {
+    return Promise.resolve(
+      modTypeFromInstructions(instructions) === MOD_TYPE_UE4SS_SIG,
+    );
+  }
+  return Promise.resolve(
+    sourceHasSegment(instructions, UE4SS_SIGNATURES_FOLDER) ||
+      instructionsHaveMarker(instructions, UE4SS_SIG_MARKERS),
+  );
 }
 
 export function getSharedLibPath(api: types.IExtensionApi): string {
@@ -152,13 +209,7 @@ export function testSharedLibPath(
     SHARED_LIB_MARKERS,
   );
   const hasShared = sourceHasSegment(instructions, 'shared');
-  const hasLuaNoScripts = instructions.some(
-    (inst) =>
-      inst.type === 'copy' &&
-      LUA_EXTENSIONS.includes(path.extname(inst.source as string).toLowerCase()) &&
-      !(inst.source as string).toLowerCase().split(/[/\\]/).includes('scripts'),
-  );
-  return Promise.resolve(hasMarkerFile || hasShared || hasLuaNoScripts);
+  return Promise.resolve(hasMarkerFile || hasShared);
 }
 
 export function getLuaPath(api: types.IExtensionApi): string {
@@ -294,29 +345,4 @@ export function testContentPath(
     .map((source) => source.split(/[/\\]/)[0]?.toLowerCase())
     .find(Boolean);
   return Promise.resolve(topSeg === 'content' || topSeg === 'config');
-}
-
-export function getBinariesPath(api: types.IExtensionApi): string {
-  const root = discoveryPath(api);
-  return root ? path.join(root, BINARIES_WIN64) : '.';
-}
-
-export function testBinariesPath(
-  instructions: types.IInstruction[],
-): Promise<boolean> {
-  if (hasModTypeInstruction(instructions)) {
-    return Promise.resolve(
-      modTypeFromInstructions(instructions) === MOD_TYPE_BINARIES,
-    );
-  }
-  const hasBinary = instructions.some((inst) => {
-    if (inst.type !== 'copy') {
-      return false;
-    }
-    const ext = path.extname(inst.source as string).toLowerCase();
-    return ext === '.dll' || ext === '.exe';
-  });
-  return Promise.resolve(
-    instructionsHaveMarker(instructions, BINARIES_MARKERS) && hasBinary,
-  );
 }

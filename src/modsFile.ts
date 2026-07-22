@@ -3,11 +3,14 @@ import { actions, fs, log, selectors, types, util } from 'vortex-api';
 
 import {
   FOLDER_ATTR,
+  FOLDERS_ATTR,
   GAME_ID,
   LUA_MODS_PATH,
   MOD_TYPE_DLL,
   MOD_TYPE_LUA,
   MOD_TYPE_PAK,
+  MOD_TYPE_ROOT,
+  MOD_TYPE_UE4SS_SIG,
   MODS_FILE,
   PAK_EXTENSIONS,
   PAK_MODS_PATH,
@@ -30,7 +33,12 @@ const DEFAULT_BUILTIN_ENABLED: { [name: string]: boolean } = {
   Keybinds: true,
 };
 
-const MODS_TXT_TYPES = [MOD_TYPE_LUA, MOD_TYPE_DLL];
+const MODS_TXT_TYPES = [
+  MOD_TYPE_LUA,
+  MOD_TYPE_DLL,
+  MOD_TYPE_UE4SS_SIG,
+  MOD_TYPE_ROOT,
+];
 
 export function makePrefix(input: number): string {
   let n = input;
@@ -93,8 +101,49 @@ export function folderIdForMod(mod: types.IMod): string {
   return (mod.attributes?.[FOLDER_ATTR] as string) || mod.id;
 }
 
+export function folderIdsForMod(mod: types.IMod): string[] {
+  const raw = mod.attributes?.[FOLDERS_ATTR];
+  if (typeof raw === 'string' && raw.length > 0) {
+    try {
+      const parsed = JSON.parse(raw) as unknown;
+      if (Array.isArray(parsed)) {
+        const names = parsed.filter(
+          (n): n is string => typeof n === 'string' && n.length > 0,
+        );
+        if (names.length > 0) {
+          return names;
+        }
+      }
+    } catch {
+      // fall through
+    }
+  }
+  return [folderIdForMod(mod)];
+}
+
 function displayNameForMod(mod: types.IMod): string {
   return folderIdForMod(mod);
+}
+
+function diskEnabledMap(
+  diskEntries: IModsTxtEntry[],
+): Map<string, boolean> {
+  return new Map(
+    diskEntries.map((e) => [e.name.toLowerCase(), e.enabled]),
+  );
+}
+
+function enabledFromDisk(
+  diskMap: Map<string, boolean>,
+  mod: types.IMod,
+): boolean {
+  for (const folder of folderIdsForMod(mod)) {
+    const flag = diskMap.get(folder.toLowerCase());
+    if (flag !== undefined) {
+      return flag;
+    }
+  }
+  return true;
 }
 
 async function listManualModFolders(
@@ -217,9 +266,12 @@ function enabledModsByTypes(
     .map((id) => mods[id]);
 }
 
-function parsePakPrefixFromFilename(filename: string): string | undefined {
-  const match = /^([A-Z]+)-/.exec(path.basename(filename));
-  return match?.[1];
+function parsePakMergeName(name: string): { prefix: string; modId: string } | undefined {
+  const match = /^([A-Z]+)-(.+)$/.exec(name);
+  if (!match) {
+    return undefined;
+  }
+  return { prefix: match[1], modId: match[2] };
 }
 
 async function pakOrderFromDisk(
@@ -238,19 +290,42 @@ async function pakOrderFromDisk(
   const ordered: { prefix: string; modId: string }[] = [];
 
   for (const entry of entries) {
+    const entryPath = path.join(pakDir, entry);
+    let isDir = false;
+    try {
+      isDir = (await fs.statAsync(entryPath)).isDirectory();
+    } catch {
+      continue;
+    }
+
+    // mergeMods deploys as ~mods/AAA-<modId>/… (folder). Also accept flat
+    // AAA-<modId>.pak for older/manual layouts.
+    if (isDir) {
+      const parsed = parsePakMergeName(entry);
+      if (!parsed) {
+        continue;
+      }
+      const mod = modById.get(parsed.modId.toLowerCase());
+      if (!mod) {
+        continue;
+      }
+      ordered.push({ prefix: parsed.prefix, modId: mod.id });
+      continue;
+    }
+
     const ext = path.extname(entry).toLowerCase();
     if (!PAK_EXTENSIONS.includes(ext)) {
       continue;
     }
-    const prefix = parsePakPrefixFromFilename(entry);
     const base = path.basename(entry, ext);
-    const suffix = prefix ? base.slice(prefix.length + 1) : base;
+    const parsed = parsePakMergeName(base);
+    const suffix = parsed?.modId ?? base;
     const mod = modById.get(suffix.toLowerCase());
     if (!mod) {
       continue;
     }
     ordered.push({
-      prefix: prefix ?? 'ZZZZ',
+      prefix: parsed?.prefix ?? 'ZZZZ',
       modId: mod.id,
     });
   }
@@ -324,28 +399,39 @@ export async function deserializeLoadOrder(
 ): Promise<types.LoadOrder> {
   const discoveryPath = getDiscoveryPath(api);
   const diskEntries = discoveryPath ? await readModsTxt(discoveryPath) : [];
+  const diskMap = diskEnabledMap(diskEntries);
   const diskOrder = diskEntries
     .filter((e) => !isBuiltin(e.name) && !isShared(e.name))
     .map((e) => e.name.toLowerCase());
 
-  const txtMods = enabledModsByTypes(api, MODS_TXT_TYPES);
-  const byFolder = new Map(
-    txtMods.map((m) => [folderIdForMod(m).toLowerCase(), m]),
-  );
+  const txtMods = enabledModsByTypes(api, MODS_TXT_TYPES).filter((mod) => {
+    // Root mods without UE4SS mod folders do not belong in mods.txt LO
+    if (mod.type === MOD_TYPE_ROOT) {
+      return Boolean(mod.attributes?.[FOLDER_ATTR]);
+    }
+    return true;
+  });
+
+  const byFolder = new Map<string, types.IMod>();
+  for (const mod of txtMods) {
+    for (const folder of folderIdsForMod(mod)) {
+      byFolder.set(folder.toLowerCase(), mod);
+    }
+  }
 
   const ordered: types.ILoadOrderEntry[] = [];
   const used = new Set<string>();
 
   for (const name of diskOrder) {
     const mod = byFolder.get(name);
-    if (!mod) {
+    if (!mod || used.has(mod.id)) {
       continue;
     }
     used.add(mod.id);
     ordered.push({
       id: mod.id,
       name: displayNameForMod(mod),
-      enabled: true,
+      enabled: enabledFromDisk(diskMap, mod),
       modId: mod.id,
     });
   }
@@ -357,7 +443,7 @@ export async function deserializeLoadOrder(
     ordered.push({
       id: mod.id,
       name: displayNameForMod(mod),
-      enabled: true,
+      enabled: enabledFromDisk(diskMap, mod),
       modId: mod.id,
     });
   }
@@ -405,11 +491,15 @@ export async function serializeLoadOrder(
     if (!mod) {
       continue;
     }
-    if (MODS_TXT_TYPES.includes(mod.type)) {
-      userOrder.push({
-        name: folderIdForMod(mod),
-        enabled: entry.enabled !== false,
-      });
+    if (!MODS_TXT_TYPES.includes(mod.type)) {
+      continue;
+    }
+    if (mod.type === MOD_TYPE_ROOT && !mod.attributes?.[FOLDER_ATTR]) {
+      continue;
+    }
+    const enabled = entry.enabled !== false;
+    for (const folder of folderIdsForMod(mod)) {
+      userOrder.push({ name: folder, enabled });
     }
   }
 
@@ -443,10 +533,13 @@ export async function syncModsTxtFromEnabled(
     if (!mod || !MODS_TXT_TYPES.includes(mod.type)) {
       continue;
     }
-    userOrder.push({
-      name: entry.name,
-      enabled: entry.enabled !== false,
-    });
+    if (mod.type === MOD_TYPE_ROOT && !mod.attributes?.[FOLDER_ATTR]) {
+      continue;
+    }
+    const enabled = entry.enabled !== false;
+    for (const folder of folderIdsForMod(mod)) {
+      userOrder.push({ name: folder, enabled });
+    }
   }
   await writeModsTxt(discoveryPath, userOrder);
 }

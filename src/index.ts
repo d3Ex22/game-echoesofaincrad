@@ -3,15 +3,19 @@ import path from 'path';
 import { fs, log, selectors, types, util } from 'vortex-api';
 
 import {
-  CONTENT_PATH,
+  BINARIES_WIN64,
+  BITFIX_DIR,
+  BITFIX_NEXUS_URL,
+  BITFIX_ONDISK_MARKERS,
   EXECUTABLE,
   GAME_ID,
   GAME_LOGO,
   IGNORE_CONFLICTS,
   LOGICMODS_PATH,
   LUA_MODS_PATH,
-  MOD_TYPE_BINARIES,
-  MOD_TYPE_COMBO,
+  NEEDS_BITFIX_ATTR,
+  MOD_TYPE_BITFIX,
+  MOD_TYPE_BITFIX_MOD,
   MOD_TYPE_CONTENT,
   MOD_TYPE_DLL,
   MOD_TYPE_LOGICMOD,
@@ -21,6 +25,8 @@ import {
   MOD_TYPE_ROOT,
   MOD_TYPE_SHARED_LIB,
   MOD_TYPE_UE4SS,
+  MOD_TYPE_UE4SS_SIG,
+  NOTIF_ID_BITFIX_MISSING,
   NOTIF_ID_UE4SS_MISSING,
   PAKS_PATH,
   PAK_MODS_PATH,
@@ -35,8 +41,8 @@ import {
 } from './common';
 
 import {
-  installBinariesMod,
-  installComboMod,
+  installBitfix,
+  installBitfixMod,
   installContentMod,
   installDllMod,
   installLogicMod,
@@ -47,8 +53,9 @@ import {
   installRootMod,
   installSharedLib,
   installUe4ss,
-  testBinariesMod,
-  testComboMod,
+  installUe4ssSigMod,
+  testBitfix,
+  testBitfixMod,
   testContentMod,
   testDllMod,
   testLogicMod,
@@ -59,11 +66,12 @@ import {
   testRootMod,
   testSharedLib,
   testUe4ss,
+  testUe4ssSigMod,
 } from './installers';
 
 import {
-  getBinariesPath,
-  getComboPath,
+  getBitfixModPath,
+  getBitfixPath,
   getContentPath,
   getDllPath,
   getLogicModPath,
@@ -73,9 +81,10 @@ import {
   getRootModPath,
   getSharedLibPath,
   getUe4ssPath,
+  getUe4ssSigPath,
   mergePakMods,
-  testBinariesPath,
-  testComboPath,
+  testBitfixModPath,
+  testBitfixPath,
   testContentPath,
   testDllPath,
   testLogicModPath,
@@ -85,6 +94,7 @@ import {
   testRootModPath,
   testSharedLibPath,
   testUe4ssPath,
+  testUe4ssSigPath,
 } from './modtypes';
 
 import {
@@ -93,7 +103,9 @@ import {
   syncModsTxtFromEnabled,
 } from './modsFile';
 
+import { downloadBitfixFromNexus, isBitfixVortexMod } from './bitfixDownload';
 import { downloadUe4ssFromNexus, isUe4ssVortexMod } from './ue4ssDownload';
+import { ensureUe4ssOverrideRules } from './ue4ssRules';
 
 async function isUe4ssOnDisk(discoveryPath: string): Promise<boolean> {
   const hasLoader = await fs
@@ -109,6 +121,84 @@ async function isUe4ssOnDisk(discoveryPath: string): Promise<boolean> {
   return hasLoader && hasUe4ss;
 }
 
+async function isBitfixOnDisk(discoveryPath: string): Promise<boolean> {
+  const win64 = path.join(discoveryPath, BINARIES_WIN64);
+  for (const name of BITFIX_ONDISK_MARKERS) {
+    const found = await fs
+      .statAsync(path.join(win64, name))
+      .then(() => true)
+      .catch(() => false);
+    if (found) {
+      return true;
+    }
+  }
+  // bitfix.txt may also live under bitfix/ (folder alone is not enough —
+  // prepareForModding creates an empty bitfix/ dir).
+  const nestedTxt = await fs
+    .statAsync(path.join(discoveryPath, BITFIX_DIR, 'bitfix.txt'))
+    .then(() => true)
+    .catch(() => false);
+  return nestedTxt;
+}
+
+function hasBitfixDependentMods(api: types.IExtensionApi): boolean {
+  const mods: { [id: string]: types.IMod } = util.getSafe(
+    api.getState(),
+    ['persistent', 'mods', GAME_ID],
+    {},
+  );
+  return Object.keys(mods).some((id) => {
+    const mod = mods[id];
+    return (
+      mod?.type === MOD_TYPE_BITFIX_MOD ||
+      Boolean(mod?.attributes?.[NEEDS_BITFIX_ATTR])
+    );
+  });
+}
+
+function maybeOfferBitfix(api: types.IExtensionApi, discoveryPath?: string) {
+  void (async () => {
+    const discovery =
+      discoveryPath ??
+      selectors.discoveryByGame(api.getState(), GAME_ID)?.path;
+    if (!discovery) {
+      return;
+    }
+
+    const bitfixReady =
+      (await isBitfixOnDisk(discovery)) || isBitfixVortexMod(api);
+    if (bitfixReady || !hasBitfixDependentMods(api)) {
+      api.dismissNotification(NOTIF_ID_BITFIX_MISSING);
+      return;
+    }
+
+    api.sendNotification({
+      id: NOTIF_ID_BITFIX_MISSING,
+      type: 'warning',
+      title: 'bitfix required',
+      message:
+        'A bitfix mod is installed. Install bitfix from Nexus to run it.',
+      actions: [
+        {
+          title: 'Install from Nexus',
+          action: (dismiss) => {
+            dismiss();
+            downloadBitfixFromNexus(api).catch((err) => {
+              log('error', 'bitfix Nexus install failed', err);
+            });
+          },
+        },
+        {
+          title: 'Open Nexus page',
+          action: () => {
+            util.opn(BITFIX_NEXUS_URL).catch(() => undefined);
+          },
+        },
+      ],
+    });
+  })();
+}
+
 async function prepareForModding(
   api: types.IExtensionApi,
   discovery: types.IDiscoveryResult,
@@ -121,40 +211,44 @@ async function prepareForModding(
   await fs.ensureDirWritableAsync(path.join(discovery.path, SHARED_LIBS_PATH));
   await fs.ensureDirWritableAsync(path.join(discovery.path, PAK_MODS_PATH));
   await fs.ensureDirWritableAsync(path.join(discovery.path, LOGICMODS_PATH));
+  await fs.ensureDirWritableAsync(path.join(discovery.path, BITFIX_DIR));
   await fs.ensureDirWritableAsync(
     path.join(discovery.path, ROOT_FOLDER, 'Content'),
   );
   await fs.ensureDirWritableAsync(path.join(discovery.path, PAKS_PATH));
 
-  const onDisk = await isUe4ssOnDisk(discovery.path);
-  if (onDisk || isUe4ssVortexMod(api)) {
+  const ue4ssReady =
+    (await isUe4ssOnDisk(discovery.path)) || isUe4ssVortexMod(api);
+  if (ue4ssReady) {
     api.dismissNotification(NOTIF_ID_UE4SS_MISSING);
-    return;
+  } else {
+    api.sendNotification({
+      id: NOTIF_ID_UE4SS_MISSING,
+      type: 'warning',
+      title: 'UE4SS not detected',
+      message:
+        'Install the Echoes of Aincrad UE4SS build from Nexus (required for UE4SS mods).',
+      actions: [
+        {
+          title: 'Install from Nexus',
+          action: (dismiss) => {
+            dismiss();
+            downloadUe4ssFromNexus(api).catch((err) => {
+              log('error', 'UE4SS Nexus install failed', err);
+            });
+          },
+        },
+        {
+          title: 'Open Nexus page',
+          action: () => {
+            util.opn(UE4SS_NEXUS_URL).catch(() => undefined);
+          },
+        },
+      ],
+    });
   }
 
-  api.sendNotification({
-    id: NOTIF_ID_UE4SS_MISSING,
-    type: 'warning',
-    title: 'UE4SS not detected',
-    message: 'Install the Echoes of Aincrad UE4SS build from Nexus (required).',
-    actions: [
-      {
-        title: 'Install from Nexus',
-        action: (dismiss) => {
-          dismiss();
-          downloadUe4ssFromNexus(api).catch((err) => {
-            log('error', 'UE4SS Nexus install failed', err);
-          });
-        },
-      },
-      {
-        title: 'Open Nexus page',
-        action: () => {
-          util.opn(UE4SS_NEXUS_URL).catch(() => undefined);
-        },
-      },
-    ],
-  });
+  maybeOfferBitfix(api, discovery.path);
 }
 
 function findGame() {
@@ -214,6 +308,14 @@ function main(context: types.IExtensionContext) {
   });
 
   context.registerInstaller(
+    'eoa-root',
+    9,
+    testRootMod as any,
+    ((files: string[], destinationPath: string) =>
+      installRootMod(files, destinationPath)) as any,
+  );
+
+  context.registerInstaller(
     'eoa-ue4ss',
     10,
     testUe4ss as any,
@@ -222,17 +324,10 @@ function main(context: types.IExtensionContext) {
   );
 
   context.registerInstaller(
-    'eoa-ue4ss-combo',
-    12,
-    testComboMod as any,
-    ((files: string[]) => installComboMod(files)) as any,
-  );
-
-  context.registerInstaller(
-    'eoa-root',
-    15,
-    testRootMod as any,
-    ((files: string[]) => installRootMod(files)) as any,
+    'eoa-bitfix',
+    11,
+    testBitfix as any,
+    ((files: string[]) => installBitfix(files)) as any,
   );
 
   context.registerInstaller(
@@ -241,6 +336,22 @@ function main(context: types.IExtensionContext) {
     testSharedLib as any,
     ((files: string[], destinationPath: string) =>
       installSharedLib(files, destinationPath)) as any,
+  );
+
+  context.registerInstaller(
+    'eoa-ue4ss-sig',
+    22,
+    testUe4ssSigMod as any,
+    ((files: string[], destinationPath: string) =>
+      installUe4ssSigMod(files, destinationPath)) as any,
+  );
+
+  context.registerInstaller(
+    'eoa-bitfix-mod',
+    24,
+    testBitfixMod as any,
+    ((files: string[], destinationPath: string) =>
+      installBitfixMod(files, destinationPath)) as any,
   );
 
   context.registerInstaller(
@@ -294,11 +405,14 @@ function main(context: types.IExtensionContext) {
     ((files: string[]) => installContentMod(files)) as any,
   );
 
-  context.registerInstaller(
-    'eoa-binaries',
-    49,
-    testBinariesMod as any,
-    ((files: string[]) => installBinariesMod(files)) as any,
+
+  context.registerModType(
+    MOD_TYPE_ROOT,
+    9,
+    (gameId) => gameId === GAME_ID,
+    () => getRootModPath(context.api),
+    testRootModPath as any,
+    { name: 'Root Mod', deploymentEssential: true },
   );
 
   context.registerModType(
@@ -311,22 +425,14 @@ function main(context: types.IExtensionContext) {
   );
 
   context.registerModType(
-    MOD_TYPE_COMBO,
-    12,
+    MOD_TYPE_BITFIX,
+    11,
     (gameId) => gameId === GAME_ID,
-    () => getComboPath(context.api),
-    testComboPath as any,
-    { name: 'Combo Mod', deploymentEssential: true },
+    () => getBitfixPath(context.api),
+    testBitfixPath as any,
+    { name: 'bitfix', deploymentEssential: true },
   );
 
-  context.registerModType(
-    MOD_TYPE_ROOT,
-    15,
-    (gameId) => gameId === GAME_ID,
-    () => getRootModPath(context.api),
-    testRootModPath as any,
-    { name: 'Root Mod', deploymentEssential: true },
-  );
 
   context.registerModType(
     MOD_TYPE_SHARED_LIB,
@@ -335,6 +441,24 @@ function main(context: types.IExtensionContext) {
     () => getSharedLibPath(context.api),
     testSharedLibPath as any,
     { name: 'UE4SS Shared Lib', deploymentEssential: true },
+  );
+
+  context.registerModType(
+    MOD_TYPE_UE4SS_SIG,
+    22,
+    (gameId) => gameId === GAME_ID,
+    () => getUe4ssSigPath(context.api),
+    testUe4ssSigPath as any,
+    { name: 'UE4SS Lua + Signatures', deploymentEssential: true },
+  );
+
+  context.registerModType(
+    MOD_TYPE_BITFIX_MOD,
+    24,
+    (gameId) => gameId === GAME_ID,
+    () => getBitfixModPath(context.api),
+    testBitfixModPath as any,
+    { name: 'bitfix Mod', deploymentEssential: true },
   );
 
   context.registerModType(
@@ -395,14 +519,6 @@ function main(context: types.IExtensionContext) {
     { name: 'Content Mod', deploymentEssential: true },
   );
 
-  context.registerModType(
-    MOD_TYPE_BINARIES,
-    49,
-    (gameId) => gameId === GAME_ID,
-    () => getBinariesPath(context.api),
-    testBinariesPath as any,
-    { name: 'Binaries Mod', deploymentEssential: false },
-  );
 
   context.registerLoadOrder({
     gameId: GAME_ID,
@@ -412,7 +528,7 @@ function main(context: types.IExtensionContext) {
       serializeLoadOrder(context.api, loadOrder),
     toggleableEntries: true,
     usageInstructions:
-      'Drag to reorder UE4SS Lua/DLL mods (mods.txt) and PAK mods (filename prefix in ~mods). Deploy after edits.',
+      'Drag to reorder UE4SS Lua/DLL mods (mods.txt) and PAK mods (folder prefix in ~mods). Deploy after edits.',
   });
 
   context.registerAction(
@@ -431,11 +547,38 @@ function main(context: types.IExtensionContext) {
 
   context.registerAction(
     'mod-icons',
+    291,
+    'download',
+    {},
+    'Download bitfix (Nexus)',
+    () => {
+      downloadBitfixFromNexus(context.api).catch((err) => {
+        log('error', 'bitfix Nexus install failed', err);
+      });
+    },
+    () =>
+      isActiveGame(context.api) &&
+      !isBitfixVortexMod(context.api) &&
+      hasBitfixDependentMods(context.api),
+  );
+
+  context.registerAction(
+    'mod-icons',
     300,
     'open-ext',
     {},
     'Open Lua Mods Folder',
     () => openGamePath(context.api, LUA_MODS_PATH),
+    () => isActiveGame(context.api),
+  );
+
+  context.registerAction(
+    'mod-icons',
+    298,
+    'open-ext',
+    {},
+    'Open bitfix Folder',
+    () => openGamePath(context.api, BITFIX_DIR),
     () => isActiveGame(context.api),
   );
 
@@ -480,6 +623,17 @@ function main(context: types.IExtensionContext) {
   );
 
   context.once(() => {
+    context.api.events.on(
+      'did-install-mod',
+      (gameId: string, _archiveId: string, modId: string) => {
+        if (gameId !== GAME_ID) {
+          return;
+        }
+        ensureUe4ssOverrideRules(context.api, modId);
+        maybeOfferBitfix(context.api);
+      },
+    );
+
     context.api.onAsync(
       'did-deploy',
       async (profileId: string) => {
@@ -493,8 +647,16 @@ function main(context: types.IExtensionContext) {
         } catch (err) {
           log('error', 'Failed to sync mods.txt after deploy', err);
         }
+        ensureUe4ssOverrideRules(context.api);
+        const discovery = selectors.discoveryByGame(state, GAME_ID);
+        if (discovery?.path) {
+          maybeOfferBitfix(context.api, discovery.path);
+        }
       },
     );
+
+    ensureUe4ssOverrideRules(context.api);
+    maybeOfferBitfix(context.api);
   });
 
   return true;

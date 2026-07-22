@@ -2,45 +2,54 @@ import path from 'path';
 import { fs, types } from 'vortex-api';
 
 import {
-  BINARIES_MARKERS,
-  COMBO_MARKERS,
+  BITFIX_FOLDER_NAME,
+  BITFIX_MARKERS,
+  BITFIX_PROXY_NAMES,
   CONTENT_MARKERS,
   DLL_MOD_MARKERS,
   FOLDER_ATTR,
   GAME_ID,
   hasMarker,
+  NEEDS_BITFIX_ATTR,
   IOSTORE_MARKERS,
   LOGICMOD_MARKERS,
   LUA_EXTENSIONS,
   LUA_MOD_MARKERS,
   MODS_FILE,
   MODS_FILE_BACKUP,
-  MOD_TYPE_BINARIES,
-  MOD_TYPE_COMBO,
+  MOD_TYPE_BITFIX,
+  MOD_TYPE_BITFIX_MOD,
   MOD_TYPE_CONTENT,
   MOD_TYPE_DLL,
   MOD_TYPE_LOGICMOD,
   MOD_TYPE_LUA,
   MOD_TYPE_PAK,
   MOD_TYPE_PAKALT,
-  MOD_TYPE_ROOT,
   MOD_TYPE_SHARED_LIB,
   MOD_TYPE_UE4SS,
+  MOD_TYPE_UE4SS_SIG,
   PAK_EXTENSIONS,
   PAK_MARKERS,
   PAKALT_MARKERS,
   ROOT_FOLDER,
-  ROOT_MARKERS,
   SHARED_LIB_MARKERS,
   shouldSkipInstallFile,
   UE4SS_DLL_NAME,
   UE4SS_FOLDER_NAME,
   UE4SS_LOADER_NAME,
   UE4SS_SETTINGS_NAME,
+  UE4SS_SIGNATURES_FOLDER,
+  SIG_FILES_ATTR,
+  UE4SS_SIG_MARKERS,
 } from '../common';
+import { bitfixDependencyRuleInstructions } from '../bitfixDownload';
+import { ue4ssDependencyRuleInstructions } from '../ue4ssRules';
+import { isRootArchive } from '../rootMod';
+
+export { installRootMod, testRootMod } from '../rootMod';
 
 function isDirectoryEntry(file: string): boolean {
-  return file.endsWith(path.sep) || path.extname(file) === '';
+  return file.endsWith('/') || file.endsWith('\\');
 }
 
 function normalizeSep(file: string): string {
@@ -114,17 +123,6 @@ function hasPakAsset(files: string[]): boolean {
   );
 }
 
-function hasBinaryFile(files: string[]): boolean {
-  return files.some((file) => {
-    const ext = path.extname(file).toLowerCase();
-    return ext === '.dll' || ext === '.exe';
-  });
-}
-
-function hasBinariesFolder(files: string[]): boolean {
-  return hasSegment(files, 'Binaries');
-}
-
 function hasDllsFolder(files: string[]): boolean {
   return hasSegment(files, 'dlls');
 }
@@ -147,14 +145,6 @@ function hasTildeMods(files: string[]): boolean {
 
 function hasPaksSegment(files: string[]): boolean {
   return hasSegment(files, 'Paks');
-}
-
-function isComboCandidate(files: string[]): boolean {
-  return (
-    hasEchoesofAincrad(files) &&
-    hasPakFile(files) &&
-    (hasLua(files) || hasBinariesFolder(files))
-  );
 }
 
 function topLevelSegment(files: string[]): string | undefined {
@@ -184,8 +174,61 @@ function hasLogicModsFolder(files: string[]): boolean {
   return hasSegment(files, 'logicmods');
 }
 
-function hasOnlyScriptsLua(files: string[]): boolean {
-  const nonDir = files.filter((file) => !isDirectoryEntry(file));
+function hasBitfixFolder(files: string[]): boolean {
+  return hasSegment(files, BITFIX_FOLDER_NAME);
+}
+
+function isInsideBitfix(file: string): boolean {
+  return pathSegments(file).some(
+    (s) => s.toLowerCase() === BITFIX_FOLDER_NAME.toLowerCase(),
+  );
+}
+
+function hasDllOutsideBitfix(files: string[]): boolean {
+  return files.some((file) => {
+    if (isDirectoryEntry(file)) {
+      return false;
+    }
+    if (path.extname(file).toLowerCase() !== '.dll') {
+      return false;
+    }
+    return !isInsideBitfix(file);
+  });
+}
+
+function isBitfixCoreArchive(files: string[]): boolean {
+  return hasBitfixFolder(files) && hasDllOutsideBitfix(files);
+}
+
+function bitfixRelativeSegments(file: string): string[] {
+  const segs = pathSegments(file);
+  const bfIdx = segs.findIndex(
+    (s) => s.toLowerCase() === BITFIX_FOLDER_NAME.toLowerCase(),
+  );
+  return bfIdx === -1 ? segs : segs.slice(bfIdx + 1);
+}
+
+function isFlatBitfixLayout(files: string[]): boolean {
+  const luaFiles = files.filter(
+    (file) =>
+      !isDirectoryEntry(file) &&
+      LUA_EXTENSIONS.includes(path.extname(file).toLowerCase()),
+  );
+  if (luaFiles.length === 0) {
+    return false;
+  }
+  return luaFiles.every((file) => bitfixRelativeSegments(file).length <= 1);
+}
+
+function isFlatRootLuaOnly(files: string[]): boolean {
+  if (hasScriptsFolder(files) || hasSharedFolder(files) || hasPakAsset(files)) {
+    return false;
+  }
+  const nonDir = files.filter(
+    (file) =>
+      !isDirectoryEntry(file) &&
+      !shouldSkipInstallFile(path.basename(file).toLowerCase()),
+  );
   if (nonDir.length === 0) {
     return false;
   }
@@ -194,8 +237,41 @@ function hasOnlyScriptsLua(files: string[]): boolean {
     if (!LUA_EXTENSIONS.includes(ext)) {
       return false;
     }
-    return hasSegment([file], 'scripts');
+    return pathSegments(file).length === 1;
   });
+}
+
+function isBitfixLuaArchive(files: string[]): boolean {
+  if (!hasLua(files) || hasScriptsLua(files) || hasUe4ssIdentifiers(files)) {
+    return false;
+  }
+  if (isBitfixCoreArchive(files)) {
+    return false;
+  }
+  if (hasMarker(files, BITFIX_MARKERS) || hasBitfixFolder(files)) {
+    return true;
+  }
+  return isFlatRootLuaOnly(files);
+}
+
+function hasUe4ssSignaturesFolder(files: string[]): boolean {
+  return hasSegment(files, UE4SS_SIGNATURES_FOLDER);
+}
+
+function hasModsFolder(files: string[]): boolean {
+  return hasSegment(files, 'Mods');
+}
+
+function isUe4ssSigArchive(files: string[]): boolean {
+  if (hasUe4ssIdentifiers(files) || isBitfixCoreArchive(files)) {
+    return false;
+  }
+  const hasSigFolder = hasUe4ssSignaturesFolder(files);
+  const hasSigMarker = hasMarker(files, UE4SS_SIG_MARKERS);
+  if (!hasSigFolder && !hasSigMarker) {
+    return false;
+  }
+  return hasScriptsLua(files) || hasModsFolder(files) || hasSigFolder;
 }
 
 function stripFromSegment(file: string, segment: string): string | undefined {
@@ -207,77 +283,6 @@ function stripFromSegment(file: string, segment: string): string | undefined {
   return segs.slice(idx).join(path.sep);
 }
 
-function stripFromEchoesOrEngine(file: string): string | undefined {
-  return (
-    stripFromSegment(file, ROOT_FOLDER) ?? stripFromSegment(file, 'Engine')
-  );
-}
-
-function excludesRootMod(files: string[]): boolean {
-  if (isComboCandidate(files)) {
-    return true;
-  }
-  if (hasLogicModsFolder(files) || hasMarker(files, LOGICMOD_MARKERS)) {
-    return true;
-  }
-  if (hasUe4ssIdentifiers(files)) {
-    return true;
-  }
-  if (hasOnlyScriptsLua(files)) {
-    return true;
-  }
-  if (hasDllsFolder(files) && files.some((f) => path.extname(f).toLowerCase() === '.dll')) {
-    return true;
-  }
-  if (hasUtocFile(files) && !hasPakFile(files)) {
-    return true;
-  }
-  if (hasPakFile(files) && hasPaksSegment(files) && !hasTildeMods(files)) {
-    return true;
-  }
-  if (hasPakFile(files) || hasUtocFile(files) || hasUcasFile(files)) {
-    return true;
-  }
-  if (hasTopLevelContentOrConfig(files)) {
-    return true;
-  }
-  if (
-    hasBinaryFile(files) &&
-    !hasLua(files) &&
-    !hasPakAsset(files)
-  ) {
-    return true;
-  }
-  return false;
-}
-
-function copyTreeInstructions(
-  files: string[],
-  stripFn: (file: string) => string | undefined,
-  modType: string,
-): types.IInstruction[] {
-  const normalized = files.map(normalizeSep);
-  const instructions: types.IInstruction[] = [
-    { type: 'setmodtype', value: modType },
-  ];
-
-  for (const file of normalized) {
-    if (isDirectoryEntry(file)) {
-      continue;
-    }
-    const baseLower = path.basename(file).toLowerCase();
-    if (shouldSkipInstallFile(baseLower)) {
-      continue;
-    }
-    const dest = stripFn(file);
-    if (!dest) {
-      continue;
-    }
-    instructions.push({ type: 'copy', source: file, destination: dest });
-  }
-
-  return instructions;
-}
 
 export async function testUe4ss(
   files: string[],
@@ -285,6 +290,8 @@ export async function testUe4ss(
 ): Promise<types.ISupportedResult> {
   const supported =
     gameId === GAME_ID &&
+    !hasFomod(files) &&
+    !isRootArchive(files) &&
     files.some((file) =>
       UE4SS_IDENTIFIERS.includes(path.basename(file).toLowerCase()),
     );
@@ -353,78 +360,270 @@ export async function installUe4ss(
   return { instructions };
 }
 
-export async function testComboMod(
+export async function testBitfix(
   files: string[],
   gameId: string,
 ): Promise<types.ISupportedResult> {
-  if (gameId !== GAME_ID || hasFomod(files)) {
-    return { supported: false, requiredFiles: [] };
-  }
   const supported =
-    isComboCandidate(files) ||
-    (hasMarker(files, COMBO_MARKERS) && hasRootFolderSignals(files));
+    gameId === GAME_ID &&
+    !hasFomod(files) &&
+    !isRootArchive(files) &&
+    isBitfixCoreArchive(files);
   return { supported, requiredFiles: [] };
 }
 
-export async function installComboMod(
+export async function installBitfix(
   files: string[],
 ): Promise<types.IInstallResult> {
-  return {
-    instructions: copyTreeInstructions(
-      files,
-      (file) => stripFromSegment(file, ROOT_FOLDER),
-      MOD_TYPE_COMBO,
-    ),
-  };
+  const normalized = files.map(normalizeSep);
+  const instructions: types.IInstruction[] = [
+    { type: 'setmodtype', value: MOD_TYPE_BITFIX },
+  ];
+
+  const proxyNames = new Set(
+    BITFIX_PROXY_NAMES.map((name) => name.toLowerCase()),
+  );
+
+  for (const file of normalized) {
+    if (isDirectoryEntry(file)) {
+      continue;
+    }
+
+    const baseLower = path.basename(file).toLowerCase();
+    const segs = pathSegments(file);
+
+    if (shouldSkipInstallFile(baseLower)) {
+      continue;
+    }
+
+    let destination: string;
+    const bitfixIdx = segs.findIndex(
+      (s) => s.toLowerCase() === BITFIX_FOLDER_NAME.toLowerCase(),
+    );
+
+    if (bitfixIdx !== -1) {
+      destination = segs.slice(bitfixIdx).join(path.sep);
+    } else if (
+      proxyNames.has(baseLower) ||
+      path.extname(baseLower) === '.dll'
+    ) {
+      destination = path.basename(file);
+    } else {
+      destination = path.join(BITFIX_FOLDER_NAME, path.basename(file));
+    }
+
+    instructions.push({ type: 'copy', source: file, destination });
+  }
+
+  return { instructions };
 }
 
-export async function testRootMod(
+export async function testBitfixMod(
   files: string[],
   gameId: string,
 ): Promise<types.ISupportedResult> {
-  if (gameId !== GAME_ID || hasFomod(files)) {
-    return { supported: false, requiredFiles: [] };
-  }
-
-  const byStructure =
-    hasRootFolderSignals(files) && !excludesRootMod(files);
-  const byMarker =
-    hasMarker(files, ROOT_MARKERS) && !excludesRootMod(files);
-
-  return { supported: byStructure || byMarker, requiredFiles: [] };
+  const supported =
+    gameId === GAME_ID &&
+    !hasFomod(files) &&
+    !isRootArchive(files) &&
+    isBitfixLuaArchive(files) &&
+    !hasMarker(files, SHARED_LIB_MARKERS) &&
+    !hasSharedFolder(files);
+  return { supported, requiredFiles: [] };
 }
 
-export async function installRootMod(
+export async function installBitfixMod(
   files: string[],
+  destinationPath: string,
 ): Promise<types.IInstallResult> {
-  return {
-    instructions: copyTreeInstructions(
-      files,
-      stripFromEchoesOrEngine,
-      MOD_TYPE_ROOT,
-    ),
-  };
+  const normalized = files.map(normalizeSep);
+  const flat = isFlatBitfixLayout(normalized);
+
+  const luaFiles = normalized.filter((file) =>
+    LUA_EXTENSIONS.includes(path.extname(file).toLowerCase()),
+  );
+  luaFiles.sort((a, b) => a.length - b.length);
+  const shortest = luaFiles[0];
+  const segments = shortest ? bitfixRelativeSegments(shortest) : [];
+
+  let folderId = path.basename(destinationPath, '.installing');
+  if (!flat) {
+    if (
+      segments.length >= 2 &&
+      path
+        .basename(segments[segments.length - 1], path.extname(segments[segments.length - 1]))
+        .toLowerCase() === segments[segments.length - 2].toLowerCase()
+    ) {
+      folderId = segments[segments.length - 2];
+    } else if (segments.length > 1) {
+      folderId = segments[0];
+    }
+  }
+
+  const instructions: types.IInstruction[] = [
+    { type: 'setmodtype', value: MOD_TYPE_BITFIX_MOD },
+    { type: 'attribute', key: FOLDER_ATTR, value: folderId },
+    { type: 'attribute', key: NEEDS_BITFIX_ATTR, value: true },
+    ...bitfixDependencyRuleInstructions(),
+  ];
+
+  for (const file of normalized) {
+    if (isDirectoryEntry(file)) {
+      continue;
+    }
+    const baseLower = path.basename(file).toLowerCase();
+    if (shouldSkipInstallFile(baseLower)) {
+      continue;
+    }
+
+    const relSegs = bitfixRelativeSegments(file);
+    if (relSegs.length === 0) {
+      continue;
+    }
+
+    let relative: string;
+    if (flat) {
+      relative = path.basename(file);
+    } else {
+      relative = relSegs.join(path.sep);
+    }
+
+    if (!relative) {
+      continue;
+    }
+
+    instructions.push({
+      type: 'copy',
+      source: file,
+      destination: relative,
+    });
+  }
+
+  return { instructions };
+}
+
+export async function testUe4ssSigMod(
+  files: string[],
+  gameId: string,
+): Promise<types.ISupportedResult> {
+  const supported =
+    gameId === GAME_ID &&
+    !hasFomod(files) &&
+    !isRootArchive(files) &&
+    isUe4ssSigArchive(files);
+  return { supported, requiredFiles: [] };
+}
+
+export async function installUe4ssSigMod(
+  files: string[],
+  destinationPath: string,
+): Promise<types.IInstallResult> {
+  const normalized = files.map(normalizeSep);
+
+  let folderId = path.basename(destinationPath, '.installing');
+  for (const file of normalized) {
+    const segs = pathSegments(file);
+    const modsIdx = segs.findIndex((s) => s.toLowerCase() === 'mods');
+    if (
+      modsIdx !== -1 &&
+      segs.length > modsIdx + 1 &&
+      segs[modsIdx + 1].toLowerCase() !== 'shared'
+    ) {
+      folderId = segs[modsIdx + 1];
+      break;
+    }
+  }
+
+  const instructions: types.IInstruction[] = [
+    { type: 'setmodtype', value: MOD_TYPE_UE4SS_SIG },
+    { type: 'attribute', key: FOLDER_ATTR, value: folderId },
+  ];
+
+  // Win64-relative paths for UE4SS after+fileList (UE4SS deploy root = Win64)
+  const sigOverridePaths: string[] = [];
+
+  for (const file of normalized) {
+    if (isDirectoryEntry(file)) {
+      continue;
+    }
+    const baseLower = path.basename(file).toLowerCase();
+    if (shouldSkipInstallFile(baseLower)) {
+      continue;
+    }
+    if (baseLower === 'readme.md' || baseLower === 'readme.txt') {
+      continue;
+    }
+
+    const segs = pathSegments(file);
+    const modsIdx = segs.findIndex((s) => s.toLowerCase() === 'mods');
+    const sigIdx = segs.findIndex(
+      (s) => s.toLowerCase() === UE4SS_SIGNATURES_FOLDER.toLowerCase(),
+    );
+
+    let destination: string | undefined;
+    if (modsIdx !== -1 && segs.length > modsIdx + 1) {
+      // Deploy root is ue4ss/Mods → CompanionBeQuiet/Scripts/...
+      destination = segs.slice(modsIdx + 1).join(path.sep);
+    } else if (sigIdx !== -1) {
+      // Escape Mods/ into sibling UE4SS_Signatures/
+      destination = path.join('..', segs.slice(sigIdx).join(path.sep));
+      sigOverridePaths.push(
+        path.join(UE4SS_FOLDER_NAME, segs.slice(sigIdx).join(path.sep)),
+      );
+    } else if (
+      LUA_EXTENSIONS.includes(path.extname(file).toLowerCase()) ||
+      hasMarker([file], UE4SS_SIG_MARKERS)
+    ) {
+      if (hasMarker([file], UE4SS_SIG_MARKERS)) {
+        continue;
+      }
+      destination = path.join(folderId, 'Scripts', path.basename(file));
+    }
+
+    if (!destination) {
+      continue;
+    }
+
+    instructions.push({ type: 'copy', source: file, destination });
+  }
+
+  if (sigOverridePaths.length > 0) {
+    instructions.push({
+      type: 'attribute',
+      key: SIG_FILES_ATTR,
+      value: JSON.stringify(sigOverridePaths),
+    });
+  }
+
+  instructions.push(
+    ...ue4ssDependencyRuleInstructions(sigOverridePaths, {
+      overridesOnly: true,
+    }),
+  );
+
+  return { instructions };
 }
 
 export async function testSharedLib(
   files: string[],
   gameId: string,
 ): Promise<types.ISupportedResult> {
-  if (gameId !== GAME_ID || hasFomod(files)) {
+  if (
+    gameId !== GAME_ID ||
+    hasFomod(files) ||
+    isRootArchive(files) ||
+    isBitfixLuaArchive(files) ||
+    isBitfixCoreArchive(files)
+  ) {
     return { supported: false, requiredFiles: [] };
   }
 
-  const hasLuaFiles = hasLua(files);
-  if (!hasLuaFiles) {
+  if (!hasLua(files)) {
     return { supported: false, requiredFiles: [] };
   }
 
   const supported =
-    hasSharedFolder(files) ||
-    hasMarker(files, SHARED_LIB_MARKERS) ||
-    (hasLuaFiles &&
-      !hasScriptsFolder(files) &&
-      !hasMarker(files, LUA_MOD_MARKERS));
+    hasSharedFolder(files) || hasMarker(files, SHARED_LIB_MARKERS);
 
   return { supported, requiredFiles: [] };
 }
@@ -459,6 +658,7 @@ export async function installSharedLib(
   const instructions: types.IInstruction[] = [
     { type: 'setmodtype', value: MOD_TYPE_SHARED_LIB },
     { type: 'attribute', key: FOLDER_ATTR, value: libId },
+    ...ue4ssDependencyRuleInstructions(),
   ];
 
   for (const file of normalized) {
@@ -492,8 +692,14 @@ export async function testLuaMod(
   if (
     gameId !== GAME_ID ||
     hasFomod(files) ||
+    isRootArchive(files) ||
     hasSharedFolder(files) ||
-    hasMarker(files, SHARED_LIB_MARKERS)
+    hasMarker(files, SHARED_LIB_MARKERS) ||
+    isBitfixLuaArchive(files) ||
+    isBitfixCoreArchive(files) ||
+    isUe4ssSigArchive(files) ||
+    hasMarker(files, BITFIX_MARKERS) ||
+    hasBitfixFolder(files)
   ) {
     return { supported: false, requiredFiles: [] };
   }
@@ -542,6 +748,7 @@ export async function installLuaMod(
   const instructions: types.IInstruction[] = [
     { type: 'setmodtype', value: MOD_TYPE_LUA },
     { type: 'attribute', key: FOLDER_ATTR, value: folderId },
+    ...ue4ssDependencyRuleInstructions(),
   ];
 
   for (const file of normalized) {
@@ -572,7 +779,7 @@ export async function testDllMod(
   files: string[],
   gameId: string,
 ): Promise<types.ISupportedResult> {
-  if (gameId !== GAME_ID || hasFomod(files)) {
+  if (gameId !== GAME_ID || hasFomod(files) || isRootArchive(files)) {
     return { supported: false, requiredFiles: [] };
   }
 
@@ -618,6 +825,7 @@ export async function installDllMod(
   const instructions: types.IInstruction[] = [
     { type: 'setmodtype', value: MOD_TYPE_DLL },
     { type: 'attribute', key: FOLDER_ATTR, value: folderId },
+    ...ue4ssDependencyRuleInstructions(),
   ];
 
   for (const file of normalized) {
@@ -651,6 +859,7 @@ export async function testLogicMod(
   const supported =
     gameId === GAME_ID &&
     !hasFomod(files) &&
+    !isRootArchive(files) &&
     hasPakFile(files) &&
     (hasMarker(files, LOGICMOD_MARKERS) || hasLogicModsFolder(files));
   return { supported, requiredFiles: [] };
@@ -697,7 +906,7 @@ export async function testPakIostoreMod(
   files: string[],
   gameId: string,
 ): Promise<types.ISupportedResult> {
-  if (gameId !== GAME_ID || hasFomod(files)) {
+  if (gameId !== GAME_ID || hasFomod(files) || isRootArchive(files)) {
     return { supported: false, requiredFiles: [] };
   }
 
@@ -750,7 +959,12 @@ export async function testPakAltMod(
   files: string[],
   gameId: string,
 ): Promise<types.ISupportedResult> {
-  if (gameId !== GAME_ID || hasFomod(files) || !hasPakFile(files)) {
+  if (
+    gameId !== GAME_ID ||
+    hasFomod(files) ||
+    isRootArchive(files) ||
+    !hasPakFile(files)
+  ) {
     return { supported: false, requiredFiles: [] };
   }
 
@@ -805,6 +1019,7 @@ export async function testPakMod(
   const supported =
     gameId === GAME_ID &&
     !hasFomod(files) &&
+    !isRootArchive(files) &&
     hasPak &&
     !hasMarker(files, LOGICMOD_MARKERS) &&
     !hasLogicModsFolder(files) &&
@@ -868,6 +1083,7 @@ export async function testContentMod(
   const supported =
     gameId === GAME_ID &&
     !hasFomod(files) &&
+    !isRootArchive(files) &&
     (hasTopLevelContentOrConfig(files) ||
       hasMarker(files, CONTENT_MARKERS)) &&
     !hasLogicModsFolder(files) &&
@@ -893,65 +1109,6 @@ export async function installContentMod(
       continue;
     }
     instructions.push({ type: 'copy', source: file, destination: file });
-  }
-
-  return { instructions };
-}
-
-export async function testBinariesMod(
-  files: string[],
-  gameId: string,
-): Promise<types.ISupportedResult> {
-  if (gameId !== GAME_ID || hasFomod(files)) {
-    return { supported: false, requiredFiles: [] };
-  }
-
-  const byStructure =
-    hasBinaryFile(files) &&
-    !hasPakAsset(files) &&
-    !hasLua(files) &&
-    !hasUe4ssIdentifiers(files) &&
-    !hasDllsFolder(files);
-  const byMarker =
-    hasMarker(files, BINARIES_MARKERS) && hasBinaryFile(files);
-
-  return { supported: byStructure || byMarker, requiredFiles: [] };
-}
-
-export async function installBinariesMod(
-  files: string[],
-): Promise<types.IInstallResult> {
-  const normalized = files.map(normalizeSep);
-  const instructions: types.IInstruction[] = [
-    { type: 'setmodtype', value: MOD_TYPE_BINARIES },
-  ];
-
-  for (const file of normalized) {
-    if (isDirectoryEntry(file)) {
-      continue;
-    }
-    const baseLower = path.basename(file).toLowerCase();
-    if (shouldSkipInstallFile(baseLower)) {
-      continue;
-    }
-    const ext = path.extname(file).toLowerCase();
-    if (ext !== '.dll' && ext !== '.exe') {
-      continue;
-    }
-    const fromBinaries = stripFromSegment(file, 'Binaries');
-    let dest: string;
-    if (fromBinaries) {
-      const winIdx = folderIndex(pathSegments(fromBinaries), 'Win64');
-      dest =
-        winIdx !== -1 && pathSegments(fromBinaries).length > winIdx + 1
-          ? pathSegments(fromBinaries)
-              .slice(winIdx + 1)
-              .join(path.sep)
-          : path.basename(file);
-    } else {
-      dest = path.basename(file);
-    }
-    instructions.push({ type: 'copy', source: file, destination: dest });
   }
 
   return { instructions };
