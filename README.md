@@ -35,10 +35,10 @@ Restart Vortex after `copyplugin`.
 | Shared lib | `EchoesofAincrad/Binaries/Win64/ue4ss/Mods/shared/<Lib>/` |
 | bitfix mod | `EchoesofAincrad/Binaries/Win64/bitfix/<Mod>/` |
 | LogicMods | `EchoesofAincrad/Content/Paks/LogicMods/` |
-| Asset PAK (`~mods`) | `EchoesofAincrad/Content/Paks/~mods/` (prefix load order) |
+| Asset PAK (`~mods`) | `EchoesofAincrad/Content/Paks/~mods/` |
 | PAK Alt | `EchoesofAincrad/Content/Paks/…` (not `~mods`) |
 | Content / Config | `EchoesofAincrad/Content/…` or `EchoesofAincrad/Config/…` |
-| Load order | `ue4ss/Mods/mods.txt` (Lua + DLL via Vortex load order); PAK order via folder prefix `AAA-<modId>/` in `~mods` |
+| Load order | `ue4ss/Mods/mods.txt` (Lua + DLL); PAK via `~mods/AAA-<modId>/`; LogicMods via `LogicMods/AAA-<modId>/` |
 
 `enabled.txt` is ignored on deploy (never copied). Enable and reorder Lua/DLL mods through Vortex load order → `mods.txt`.
 
@@ -56,8 +56,8 @@ bitfix is optional and only offered when a bitfix mod is installed.
 | Lua + Signatures | `Mods/<Mod>/Scripts/…` + `UE4SS_Signatures/*.lua` | `ue4sssig.info` · `.ue4sssig` · `.sigmod` | `…/ue4ss/Mods/<Mod>/` + `…/ue4ss/UE4SS_Signatures/` |
 | Lua | `<Mod>/Scripts/*.lua` | `ue4ssmod.info` · `.ue4ssmod` · `.luamod` | `…/ue4ss/Mods/<Mod>/` |
 | UE4SS DLL | `<Mod>/dlls/*.dll` | `ue4ssdll.info` · `.ue4ssdll` · `.dllmod` | `…/ue4ss/Mods/<Mod>/` |
-| LogicMod | `LogicMods/` or flat `.pak` + marker | `ue4sslogicmod.info` · `.ue4sslogicmod` · `.logicmod` | `EchoesofAincrad/Content/Paks/LogicMods/` |
-| Asset PAK | `~mods/` or flat `.pak` + marker | `ue4sspak.info` · `.ue4sspak` · `.assetpak` · `.pakmod` | `EchoesofAincrad/Content/Paks/~mods/` |
+| LogicMod | `LogicMods/*.pak` or `LogicMods/<Folder>/*.pak` (or flat `.pak` + marker) | `ue4sslogicmod.info` · `.ue4sslogicmod` · `.logicmod` | `…/LogicMods/AAA-<modId>/` (LO prefix) |
+| Asset PAK | `~mods/*.pak` or `~mods/<Folder>/*.pak` (or flat `.pak` + marker) | `ue4sspak.info` · `.ue4sspak` · `.assetpak` · `.pakmod` | `…/~mods/AAA-<modId>/` (LO prefix) |
 | IoStore | `.utoc` (+ `.ucas`), no `.pak` | `ue4ssiostore.info` · `.ue4ssiostore` · `.iostore` | `EchoesofAincrad/Content/Paks/~mods/` |
 | PAK Alt | `Paks/…` (not `~mods`) + `.pak` | `ue4sspakalt.info` · `.ue4sspakalt` · `.pakalt` | `EchoesofAincrad/Content/Paks/…` |
 | Content | top-level `Content/` or `Config/` | `ue4sscontent.info` · `.ue4sscontent` · `.contentmod` | `EchoesofAincrad/Content/…` or `…/Config/…` |

@@ -472,18 +472,6 @@ function mapRootDestination(
   return mapBucketDestination(file, kinds, fallbackModName);
 }
 
-/** Win64-relative path for UE4SS override fileList matching. */
-function toUe4ssRelative(destination: string): string {
-  const segs = pathSegments(destination);
-  const ueIdx = segs.findIndex(
-    (s) => s.toLowerCase() === UE4SS_FOLDER_NAME.toLowerCase(),
-  );
-  if (ueIdx !== -1) {
-    return segs.slice(ueIdx).join(path.sep);
-  }
-  return destination;
-}
-
 function collectUe4ssModFolders(destinations: string[]): string[] {
   const folders: string[] = [];
   const seen = new Set<string>();
@@ -573,7 +561,8 @@ export async function installRootMod(
         .toLowerCase()
         .includes(UE4SS_SIGNATURES_FOLDER.toLowerCase())
     ) {
-      sigFiles.push(toUe4ssRelative(destination));
+      // Game-root-relative destination (Root deploy root = game install).
+      sigFiles.push(destination.replace(/\\/g, '/'));
     }
 
     copiedDests.push(destination);
@@ -601,7 +590,11 @@ export async function installRootMod(
       key: NEEDS_UE4SS_ATTR,
       value: true,
     });
-    instructions.push(...ue4ssDependencyRuleInstructions(sigFiles));
+    // overridesOnly: never emit bare after when a root pack only needs SIG
+    // file wins — bare after vs UE4SS can empty CompanionBeQuiet-style trees.
+    instructions.push(
+      ...ue4ssDependencyRuleInstructions(sigFiles, { overridesOnly: true }),
+    );
   }
 
   const needsBitfix =

@@ -82,6 +82,7 @@ import {
   getSharedLibPath,
   getUe4ssPath,
   getUe4ssSigPath,
+  mergeLogicMods,
   mergePakMods,
   testBitfixModPath,
   testBitfixPath,
@@ -105,7 +106,10 @@ import {
 
 import { downloadBitfixFromNexus, isBitfixVortexMod } from './bitfixDownload';
 import { downloadUe4ssFromNexus, isUe4ssVortexMod } from './ue4ssDownload';
-import { ensureUe4ssOverrideRules } from './ue4ssRules';
+import {
+  ensureUe4ssOverrideRules,
+  repairUe4ssSigRules,
+} from './ue4ssRules';
 
 async function isUe4ssOnDisk(discoveryPath: string): Promise<boolean> {
   const hasLoader = await fs
@@ -485,7 +489,11 @@ function main(context: types.IExtensionContext) {
     (gameId) => gameId === GAME_ID,
     () => getLogicModPath(context.api),
     testLogicModPath as any,
-    { name: 'UE4SS LogicMod', deploymentEssential: true },
+    {
+      name: 'UE4SS LogicMod',
+      deploymentEssential: true,
+      mergeMods: mergeLogicMods(context.api),
+    },
   );
 
   context.registerModType(
@@ -528,7 +536,7 @@ function main(context: types.IExtensionContext) {
       serializeLoadOrder(context.api, loadOrder),
     toggleableEntries: true,
     usageInstructions:
-      'Drag to reorder UE4SS Lua/DLL mods (mods.txt) and PAK mods (folder prefix in ~mods). Deploy after edits.',
+      'Drag to reorder UE4SS Lua/DLL (mods.txt), PAK mods (~mods/AAA-…), and LogicMods (LogicMods/AAA-…). Deploy after edits.',
   });
 
   context.registerAction(
@@ -629,6 +637,9 @@ function main(context: types.IExtensionContext) {
         if (gameId !== GAME_ID) {
           return;
         }
+        // Only the installed mod (or migrate refs when UE4SS itself lands).
+        // Do NOT re-walk every mod on startup/deploy — that recreated requires
+        // chains and dependency recursion after Vortex restarts.
         ensureUe4ssOverrideRules(context.api, modId);
         maybeOfferBitfix(context.api);
       },
@@ -647,7 +658,8 @@ function main(context: types.IExtensionContext) {
         } catch (err) {
           log('error', 'Failed to sync mods.txt after deploy', err);
         }
-        ensureUe4ssOverrideRules(context.api);
+        // Repair SIG after+fileList only — never re-inject requires here.
+        repairUe4ssSigRules(context.api);
         const discovery = selectors.discoveryByGame(state, GAME_ID);
         if (discovery?.path) {
           maybeOfferBitfix(context.api, discovery.path);
@@ -655,7 +667,7 @@ function main(context: types.IExtensionContext) {
       },
     );
 
-    ensureUe4ssOverrideRules(context.api);
+    repairUe4ssSigRules(context.api);
     maybeOfferBitfix(context.api);
   });
 

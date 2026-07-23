@@ -38,7 +38,7 @@ import {
   UE4SS_SIGNATURES_FOLDER,
   UE4SS_SIG_MARKERS,
 } from '../common';
-import { pakPrefixForMod } from '../modsFile';
+import { logicModPrefixForMod, pakPrefixForMod } from '../modsFile';
 
 function hasModTypeInstruction(instructions: types.IInstruction[]): boolean {
   return instructions.some((instr) => instr.type === 'setmodtype');
@@ -279,6 +279,10 @@ export function testLogicModPath(
   );
   const hasLogicFolder = sourceHasSegment(instructions, 'logicmods');
   return Promise.resolve(hasMarkerFile || hasLogicFolder);
+}
+
+export function mergeLogicMods(api: types.IExtensionApi) {
+  return (mod: types.IMod) => logicModPrefixForMod(api, mod) + mod.id;
 }
 
 export function getPakPath(api: types.IExtensionApi): string {

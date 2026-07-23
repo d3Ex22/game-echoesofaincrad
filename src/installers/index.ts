@@ -539,7 +539,8 @@ export async function installUe4ssSigMod(
     { type: 'attribute', key: FOLDER_ATTR, value: folderId },
   ];
 
-  // Win64-relative paths for UE4SS after+fileList (UE4SS deploy root = Win64)
+  // SIG deploy root is ue4ss/Mods — after+fileList must use the same relative
+  // destinations (`../UE4SS_Signatures/...`), not Win64-relative ue4ss/... paths.
   const sigOverridePaths: string[] = [];
 
   for (const file of normalized) {
@@ -567,9 +568,7 @@ export async function installUe4ssSigMod(
     } else if (sigIdx !== -1) {
       // Escape Mods/ into sibling UE4SS_Signatures/
       destination = path.join('..', segs.slice(sigIdx).join(path.sep));
-      sigOverridePaths.push(
-        path.join(UE4SS_FOLDER_NAME, segs.slice(sigIdx).join(path.sep)),
-      );
+      sigOverridePaths.push(destination.replace(/\\/g, '/'));
     } else if (
       LUA_EXTENSIONS.includes(path.extname(file).toLowerCase()) ||
       hasMarker([file], UE4SS_SIG_MARKERS)

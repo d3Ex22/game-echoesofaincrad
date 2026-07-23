@@ -5,8 +5,10 @@ import {
   FOLDER_ATTR,
   FOLDERS_ATTR,
   GAME_ID,
+  LOGICMODS_PATH,
   LUA_MODS_PATH,
   MOD_TYPE_DLL,
+  MOD_TYPE_LOGICMOD,
   MOD_TYPE_LUA,
   MOD_TYPE_PAK,
   MOD_TYPE_ROOT,
@@ -16,6 +18,9 @@ import {
   PAK_MODS_PATH,
   UE4SS_BUILTIN_MODS,
 } from './common';
+
+/** Mod types that use Vortex mergeMods folder prefixes for load order. */
+const MERGE_LO_TYPES = [MOD_TYPE_PAK, MOD_TYPE_LOGICMOD];
 
 export interface IModsTxtEntry {
   name: string;
@@ -39,16 +44,6 @@ const MODS_TXT_TYPES = [
   MOD_TYPE_UE4SS_SIG,
   MOD_TYPE_ROOT,
 ];
-
-export function makePrefix(input: number): string {
-  let n = input;
-  let res = '';
-  while (n >= 0) {
-    res = String.fromCharCode(65 + (n % 26)) + res;
-    n = Math.floor(n / 26) - 1;
-  }
-  return res.length >= 3 ? res : res.padStart(3, 'A');
-}
 
 function modsTxtPath(discoveryPath: string): string {
   return path.join(discoveryPath, LUA_MODS_PATH, MODS_FILE);
@@ -146,9 +141,29 @@ function enabledFromDisk(
   return true;
 }
 
+/** Folders owned by any installed Vortex mod (enabled or not). */
+export function vortexOwnedModFolders(api: types.IExtensionApi): Set<string> {
+  const state = api.getState();
+  const mods: { [id: string]: types.IMod } = util.getSafe(
+    state,
+    ['persistent', 'mods', GAME_ID],
+    {},
+  );
+  const owned = new Set<string>();
+  for (const mod of Object.values(mods)) {
+    if (!mod || !MODS_TXT_TYPES.includes(mod.type)) {
+      continue;
+    }
+    for (const folder of folderIdsForMod(mod)) {
+      owned.add(folder.toLowerCase());
+    }
+  }
+  return owned;
+}
+
 async function listManualModFolders(
   discoveryPath: string,
-  vortexFolders: Set<string>,
+  excludeFolders: Set<string>,
 ): Promise<string[]> {
   const modsDir = path.join(discoveryPath, LUA_MODS_PATH);
   try {
@@ -158,7 +173,9 @@ async function listManualModFolders(
       if (isBuiltin(entry) || isShared(entry)) {
         continue;
       }
-      if (vortexFolders.has(entry.toLowerCase())) {
+      // Never treat Vortex-owned folders (incl. disabled) as manual — that
+      // re-enabled leftovers in mods.txt and left Scripts loading in UE4SS.
+      if (excludeFolders.has(entry.toLowerCase())) {
         continue;
       }
       try {
@@ -180,6 +197,7 @@ export async function writeModsTxt(
   discoveryPath: string,
   userOrder: IModsTxtEntry[],
   previous?: IModsTxtEntry[],
+  vortexOwned?: Set<string>,
 ): Promise<void> {
   const prev = previous ?? (await readModsTxt(discoveryPath));
   const prevMap = new Map(prev.map((e) => [e.name.toLowerCase(), e]));
@@ -215,7 +233,14 @@ export async function writeModsTxt(
     lines.push(`${entry.name} : ${entry.enabled ? 1 : 0}`);
   }
 
-  const manualFolders = await listManualModFolders(discoveryPath, seen);
+  // Exclude both LO-listed folders and every Vortex-owned folder (disabled too).
+  const exclude = new Set<string>(seen);
+  if (vortexOwned) {
+    for (const folder of vortexOwned) {
+      exclude.add(folder);
+    }
+  }
+  const manualFolders = await listManualModFolders(discoveryPath, exclude);
   if (manualFolders.length > 0) {
     lines.push('');
     lines.push('; Manually installed mods');
@@ -266,7 +291,19 @@ function enabledModsByTypes(
     .map((id) => mods[id]);
 }
 
-function parsePakMergeName(name: string): { prefix: string; modId: string } | undefined {
+export function makePrefix(input: number): string {
+  let n = input;
+  let res = '';
+  while (n >= 0) {
+    res = String.fromCharCode(65 + (n % 26)) + res;
+    n = Math.floor(n / 26) - 1;
+  }
+  return res.length >= 3 ? res : res.padStart(3, 'A');
+}
+
+function parseMergeFolderName(
+  name: string,
+): { prefix: string; modId: string } | undefined {
   const match = /^([A-Z]+)-(.+)$/.exec(name);
   if (!match) {
     return undefined;
@@ -274,23 +311,22 @@ function parsePakMergeName(name: string): { prefix: string; modId: string } | un
   return { prefix: match[1], modId: match[2] };
 }
 
-async function pakOrderFromDisk(
-  discoveryPath: string,
-  pakMods: types.IMod[],
+async function mergeFolderOrderFromDisk(
+  mergeDir: string,
+  mods: types.IMod[],
 ): Promise<string[]> {
-  const pakDir = path.join(discoveryPath, PAK_MODS_PATH);
   let entries: string[] = [];
   try {
-    entries = await fs.readdirAsync(pakDir);
+    entries = await fs.readdirAsync(mergeDir);
   } catch {
-    return pakMods.map((m) => m.id);
+    return mods.map((m) => m.id);
   }
 
-  const modById = new Map(pakMods.map((m) => [m.id.toLowerCase(), m]));
+  const modById = new Map(mods.map((m) => [m.id.toLowerCase(), m]));
   const ordered: { prefix: string; modId: string }[] = [];
 
   for (const entry of entries) {
-    const entryPath = path.join(pakDir, entry);
+    const entryPath = path.join(mergeDir, entry);
     let isDir = false;
     try {
       isDir = (await fs.statAsync(entryPath)).isDirectory();
@@ -298,10 +334,9 @@ async function pakOrderFromDisk(
       continue;
     }
 
-    // mergeMods deploys as ~mods/AAA-<modId>/… (folder). Also accept flat
-    // AAA-<modId>.pak for older/manual layouts.
+    // mergeMods deploys as <dir>/AAA-<modId>/… Also accept flat AAA-<modId>.pak.
     if (isDir) {
-      const parsed = parsePakMergeName(entry);
+      const parsed = parseMergeFolderName(entry);
       if (!parsed) {
         continue;
       }
@@ -318,7 +353,7 @@ async function pakOrderFromDisk(
       continue;
     }
     const base = path.basename(entry, ext);
-    const parsed = parsePakMergeName(base);
+    const parsed = parseMergeFolderName(base);
     const suffix = parsed?.modId ?? base;
     const mod = modById.get(suffix.toLowerCase());
     if (!mod) {
@@ -342,7 +377,7 @@ async function pakOrderFromDisk(
     result.push(item.modId);
   }
 
-  for (const mod of pakMods) {
+  for (const mod of mods) {
     if (!seen.has(mod.id)) {
       result.push(mod.id);
     }
@@ -368,13 +403,14 @@ function loadOrderFromState(api: types.IExtensionApi): types.LoadOrder {
   return [];
 }
 
-export function pakPrefixForMod(
+export function mergePrefixForMod(
   api: types.IExtensionApi,
   mod: types.IMod,
+  modType: string,
   loadOrder?: types.LoadOrder,
 ): string {
   const order = loadOrder ?? loadOrderFromState(api);
-  const pakEntries = order.filter((entry) => {
+  const typedEntries = order.filter((entry) => {
     const state = api.getState();
     const mods: { [id: string]: types.IMod } = util.getSafe(
       state,
@@ -382,16 +418,32 @@ export function pakPrefixForMod(
       {},
     );
     const entryMod = mods[entry.id] ?? mods[entry.modId as string];
-    return entryMod?.type === MOD_TYPE_PAK && entry.enabled !== false;
+    return entryMod?.type === modType && entry.enabled !== false;
   });
 
-  const index = pakEntries.findIndex(
+  const index = typedEntries.findIndex(
     (entry) => entry.id === mod.id || entry.modId === mod.id,
   );
   if (index === -1) {
     return 'ZZZZ-';
   }
   return `${makePrefix(index)}-`;
+}
+
+export function pakPrefixForMod(
+  api: types.IExtensionApi,
+  mod: types.IMod,
+  loadOrder?: types.LoadOrder,
+): string {
+  return mergePrefixForMod(api, mod, MOD_TYPE_PAK, loadOrder);
+}
+
+export function logicModPrefixForMod(
+  api: types.IExtensionApi,
+  mod: types.IMod,
+  loadOrder?: types.LoadOrder,
+): string {
+  return mergePrefixForMod(api, mod, MOD_TYPE_LOGICMOD, loadOrder);
 }
 
 export async function deserializeLoadOrder(
@@ -448,20 +500,32 @@ export async function deserializeLoadOrder(
     });
   }
 
-  const pakMods = enabledModsByTypes(api, [MOD_TYPE_PAK]);
-  if (discoveryPath && pakMods.length > 0) {
-    const pakOrder = await pakOrderFromDisk(discoveryPath, pakMods);
-    for (const modId of pakOrder) {
-      const mod = pakMods.find((m) => m.id === modId);
-      if (!mod) {
+  if (discoveryPath) {
+    const mergeGroups: { type: string; relPath: string }[] = [
+      { type: MOD_TYPE_PAK, relPath: PAK_MODS_PATH },
+      { type: MOD_TYPE_LOGICMOD, relPath: LOGICMODS_PATH },
+    ];
+    for (const group of mergeGroups) {
+      const groupMods = enabledModsByTypes(api, [group.type]);
+      if (groupMods.length === 0) {
         continue;
       }
-      ordered.push({
-        id: mod.id,
-        name: mod.id,
-        enabled: true,
-        modId: mod.id,
-      });
+      const groupOrder = await mergeFolderOrderFromDisk(
+        path.join(discoveryPath, group.relPath),
+        groupMods,
+      );
+      for (const modId of groupOrder) {
+        const mod = groupMods.find((m) => m.id === modId);
+        if (!mod) {
+          continue;
+        }
+        ordered.push({
+          id: mod.id,
+          name: mod.id,
+          enabled: true,
+          modId: mod.id,
+        });
+      }
     }
   }
 
@@ -478,6 +542,7 @@ export async function serializeLoadOrder(
   }
 
   const state = api.getState();
+  const profile = selectors.activeProfile(state);
   const mods: { [id: string]: types.IMod } = util.getSafe(
     state,
     ['persistent', 'mods', GAME_ID],
@@ -491,20 +556,43 @@ export async function serializeLoadOrder(
     if (!mod) {
       continue;
     }
-    if (!MODS_TXT_TYPES.includes(mod.type)) {
-      continue;
-    }
-    if (mod.type === MOD_TYPE_ROOT && !mod.attributes?.[FOLDER_ATTR]) {
-      continue;
-    }
+
     const enabled = entry.enabled !== false;
-    for (const folder of folderIdsForMod(mod)) {
-      userOrder.push({ name: folder, enabled });
+    const inModsTxt =
+      MODS_TXT_TYPES.includes(mod.type) &&
+      !(mod.type === MOD_TYPE_ROOT && !mod.attributes?.[FOLDER_ATTR]);
+    const inMergeLo = MERGE_LO_TYPES.includes(mod.type);
+
+    if (!inModsTxt && !inMergeLo) {
+      continue;
+    }
+
+    // Mirror LO toggle onto the Vortex mod so deploy removes leftover files.
+    if (profile?.gameId === GAME_ID) {
+      const currently = util.getSafe(
+        profile,
+        ['modState', mod.id, 'enabled'],
+        false,
+      );
+      if (currently !== enabled) {
+        api.store.dispatch(actions.setModEnabled(profile.id, mod.id, enabled));
+      }
+    }
+
+    if (inModsTxt) {
+      for (const folder of folderIdsForMod(mod)) {
+        userOrder.push({ name: folder, enabled });
+      }
     }
   }
 
   try {
-    await writeModsTxt(discoveryPath, userOrder);
+    await writeModsTxt(
+      discoveryPath,
+      userOrder,
+      undefined,
+      vortexOwnedModFolders(api),
+    );
     api.store.dispatch(actions.setDeploymentNecessary(GAME_ID, true));
   } catch (err) {
     log('error', 'Failed to write mods.txt', err);
@@ -541,5 +629,10 @@ export async function syncModsTxtFromEnabled(
       userOrder.push({ name: folder, enabled });
     }
   }
-  await writeModsTxt(discoveryPath, userOrder);
+  await writeModsTxt(
+    discoveryPath,
+    userOrder,
+    undefined,
+    vortexOwnedModFolders(api),
+  );
 }
